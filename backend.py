@@ -16,8 +16,9 @@ except Exception as e:
     sys.exit(1)
 
 def find_keyboards():
-    """Sistemdeki klavye cihazlarını otomatik olarak bulur."""
+    """Sistemdeki klavye cihazlarını otomatik olarak bulur (aynı fiziksel cihazı tekrar eklemez)."""
     keyboards = []
+    seen_phys = set()  # Aynı fiziksel cihazı çift eklemeyi önle
     for path in evdev.list_devices():
         try:
             device = evdev.InputDevice(path)
@@ -26,6 +27,12 @@ def find_keyboards():
             if evdev.ecodes.EV_KEY in capabilities:
                 supported_keys = capabilities[evdev.ecodes.EV_KEY]
                 if evdev.ecodes.KEY_R in supported_keys:
+                    # Aynı fiziksel cihazı (phys) tekrar ekleme
+                    phys = device.phys or device.path
+                    if phys in seen_phys:
+                        print(f"[ATLA] Tekrar cihaz: {device.name} ({device.path}, phys={phys})")
+                        continue
+                    seen_phys.add(phys)
                     keyboards.append(device)
         except Exception:
             pass

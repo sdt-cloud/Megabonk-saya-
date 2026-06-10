@@ -183,6 +183,7 @@ class MegabonkHUD(QMainWindow):
         self.saved_x = None
         self.saved_y = None
         self.scale_factor = 1.0
+        self.last_increment_time = 0  # Debounce: çift sayma önleme
 
         # Pencereyi Başlat
         self.load_stats()
@@ -402,6 +403,12 @@ class MegabonkHUD(QMainWindow):
 
     def increment_counter(self):
         """Sayacı arttırır, kaydeder ve arayüzde gösterir."""
+        # Debounce: 200ms içinde gelen tekrar sinyali yok say (çift cihaz / çift sinyal koruması)
+        now = time.time()
+        if now - self.last_increment_time < 0.2:
+            return
+        self.last_increment_time = now
+        
         self.count += 1
         self.counter_label.setText(str(self.count))
         self.save_stats()
