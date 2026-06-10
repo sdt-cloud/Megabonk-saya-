@@ -4,6 +4,7 @@ import sys
 import json
 import socket
 import time
+import platform
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QPoint, QTimer
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGraphicsDropShadowEffect
 from PyQt5.QtGui import QFont, QColor
@@ -72,17 +73,25 @@ class WindowsKeypressListener(QThread):
     def __init__(self):
         super().__init__()
         self.running = True
+        self._listener = None
 
     def stop(self):
         self.running = False
+        # pynput listener'ı düzgün durdur
+        if self._listener is not None:
+            try:
+                self._listener.stop()
+            except Exception:
+                pass
 
     def run(self):
         if WINDOWS_LISTENER == "pynput":
             alt_pressed = False
             r_press_time = None
+            r_already_down = False  # Windows key-repeat koruması
             
             def on_press(key):
-                nonlocal alt_pressed, r_press_time
+                nonlocal alt_pressed, r_press_time, r_already_down
                 if not self.running:
                     return False
                 try:
@@ -90,39 +99,54 @@ class WindowsKeypressListener(QThread):
                         alt_pressed = True
                         return
                     
+                    # pynput KeyCode kontrolü - vk (virtual key) ile de eşleşme yap
+                    char_lower = None
                     if hasattr(key, 'char') and key.char is not None:
                         char_lower = key.char.lower()
-                        if char_lower == 'r':
-                            if not alt_pressed and r_press_time is None:
-                                r_press_time = time.time()
+                    elif hasattr(key, 'vk') and key.vk is not None:
+                        # Windows'ta bazı layout'larda char None olabiliyor, vk ile kontrol et
+                        if key.vk == 0x52:  # VK_R
+                            char_lower = 'r'
+                    
+                    if char_lower == 'r':
+                        if not alt_pressed and not r_already_down:
+                            r_already_down = True
+                            r_press_time = time.time()
                 except Exception:
                     pass
 
             def on_release(key):
-                nonlocal alt_pressed, r_press_time
+                nonlocal alt_pressed, r_press_time, r_already_down
                 if key in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r):
                     alt_pressed = False
                     return
                 
                 try:
+                    char_lower = None
                     if hasattr(key, 'char') and key.char is not None:
                         char_lower = key.char.lower()
-                        if char_lower == 'r':
-                            if r_press_time is not None:
-                                duration = time.time() - r_press_time
-                                r_press_time = None
-                                if duration >= 0.1:
-                                    self.r_pressed_signal.emit()
-                        elif char_lower == 'h':
-                            if alt_pressed:
-                                self.toggle_hud_signal.emit()
+                    elif hasattr(key, 'vk') and key.vk is not None:
+                        if key.vk == 0x52:  # VK_R
+                            char_lower = 'r'
+                    
+                    if char_lower == 'r':
+                        r_already_down = False
+                        if r_press_time is not None:
+                            duration = time.time() - r_press_time
+                            r_press_time = None
+                            if duration >= 0.1:
+                                self.r_pressed_signal.emit()
+                    elif char_lower == 'h':
+                        if alt_pressed:
+                            self.toggle_hud_signal.emit()
                 except Exception:
                     pass
 
-            with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-                while self.running:
-                    self.msleep(100)
-                listener.stop()
+            self._listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+            self._listener.start()
+            while self.running and self._listener.is_alive():
+                self.msleep(100)
+            self._listener.stop()
 
         elif WINDOWS_LISTENER == "keyboard":
             r_press_time = None
@@ -167,10 +191,29 @@ class MegabonkHUD(QMainWindow):
         self.start_listeners()
 
     def init_window_properties(self):
-        # Başlık çubuğunu kaldır, her zaman üstte kalsın, görev çubuğunda gözükmesin (ToolTip türünde) ve klavye odağını almasın
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus | Qt.ToolTip)
+        # Platform bağımlı pencere bayrakları
+        if IS_WINDOWS:
+            # Windows: Qt.Tool görev çubuğunda gözükmez ve kararlı overlay olarak çalışır.
+            # Qt.ToolTip Windows'ta odak kaybında kaybolabilir, Qt.Tool daha kararlıdır.
+            self.setWindowFlags(
+                Qt.FramelessWindowHint |
+                Qt.WindowStaysOnTopHint |
+                Qt.WindowDoesNotAcceptFocus |
+                Qt.Tool
+            )
+        else:
+            # Linux: ToolTip ile görev çubuğunda gizle
+            self.setWindowFlags(
+                Qt.FramelessWindowHint |
+                Qt.WindowStaysOnTopHint |
+                Qt.WindowDoesNotAcceptFocus |
+                Qt.ToolTip
+            )
+        
         # Arka planın saydam olabilmesini sağla
         self.setAttribute(Qt.WA_TranslucentBackground)
+        # Windows'ta DWM ile uyum için ek özellik (flickering önleme)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
         
         # Konum ve boyut ayarları (Boyut apply_scale ile güncellenecek)
         width = int(220 * self.scale_factor)
@@ -391,7 +434,11 @@ class MegabonkHUD(QMainWindow):
         else:
             self.show()
             self.raise_()
-            self.activateWindow()
+            # Windows'ta pencereyi yeniden öne getir
+            if IS_WINDOWS:
+                # WindowStaysOnTopHint'i yeniden uygula (bazı Windows sürümlerinde gerekli)
+                self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+                self.show()
             print("[HUD] Gösteriliyor (Alt+H).")
 
     # Pencere Taşıma Mantığı
@@ -436,16 +483,27 @@ class MegabonkHUD(QMainWindow):
     def closeEvent(self, event):
         if hasattr(self, 'listener_thread'):
             self.listener_thread.stop()
-            self.listener_thread.wait()
+            self.listener_thread.wait(2000)  # Windows'ta hook cleanup bekleme süresi
         event.accept()
 
 
 
 if __name__ == "__main__":
+    # Windows'ta DPI ölçeklendirme sorunlarını düzelt
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+    
     app = QApplication(sys.argv)
     
-    # Modern font yükleme denemesi
-    app.setFont(QFont("Segoe UI", 9))
+    # Platform bazlı font seçimi
+    if IS_WINDOWS:
+        app.setFont(QFont("Segoe UI", 9))
+    else:
+        app.setFont(QFont("Sans-Serif", 9))
     
     hud = MegabonkHUD()
     hud.show()
